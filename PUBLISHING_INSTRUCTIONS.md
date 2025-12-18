@@ -69,7 +69,7 @@ pip install --index-url https://test.pypi.org/simple/ traylinx-auth-client
 Once you're ready to publish to the official PyPI:
 
 ```bash
-cd /Users/sebastian/Projects/makakoo/agents/traylinx/traylinx_auth_client_py
+cd /Users/sebastian/Projects/makakoo/agents/traylinx_core/traylinx_auth_client_py
 
 # Publish to PyPI
 poetry publish
@@ -158,7 +158,7 @@ For future releases:
 Run this command when you're ready:
 
 ```bash
-cd /Users/sebastian/Projects/makakoo/agents/traylinx/traylinx_auth_client_py
+cd /Users/sebastian/Projects/makakoo/agents/traylinx_core/traylinx_auth_client_py
 poetry publish
 ```
 

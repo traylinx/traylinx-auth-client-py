@@ -309,7 +309,7 @@ class TraylinxAuthClient:
 
             try:
                 response = self._session.post(
-                    f"{self.api_base_url}oauth/token",
+                    f"{self.api_base_url.rstrip('/')}/oauth/token",
                     data=data,
                     timeout=self.config.timeout,
                 )
@@ -541,7 +541,7 @@ class TraylinxAuthClient:
 
         try:
             response = self._session.post(
-                f"{self.api_base_url}/oauth/agent/introspect",
+                f"{self.api_base_url.rstrip('/')}/oauth/agent/introspect",
                 headers=headers,
                 data=data,
                 timeout=self.config.timeout,
@@ -579,12 +579,12 @@ class TraylinxAuthClient:
         rpc_url: str = None,
         include_agent_credentials: bool = None,
     ):
-        rpc_url = rpc_url or f"{self.api_base_url}/a2a/rpc"
+        rpc_url = rpc_url or f"{self.api_base_url.rstrip('/')}/a2a/rpc"
 
         # Auto-detect: if calling auth service (default), only use access_token
         # If calling another agent, use ONLY agent_secret_token (NO access_token!)
         if include_agent_credentials is None:
-            include_agent_credentials = rpc_url != f"{self.api_base_url}/a2a/rpc"
+            include_agent_credentials = rpc_url != f"{self.api_base_url.rstrip('/')}/a2a/rpc"
 
         headers = {
             "Content-Type": "application/json",
