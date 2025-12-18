@@ -151,28 +151,65 @@ def require_a2a_auth(func):
         ...     return {"message": "This endpoint requires A2A authentication"}
 
     Note:
-        The decorated function must accept a 'request' parameter as the first
-        argument (after self, if applicable) to access request headers.
+        The function must have a parameter with type annotation `Request` or a
+        parameter named `request` or `http_request` to access request headers.
     """
+    from starlette.requests import Request as StarletteRequest
 
     @wraps(func)
-    async def wrapper(request, *args, **kwargs):
+    async def wrapper(*args, **kwargs):
+        # Find the Request object in positional args or keyword args
+        http_request = None
+
+        # Check positional arguments
+        for arg in args:
+            if isinstance(arg, StarletteRequest):
+                http_request = arg
+                break
+
+        # Check keyword arguments if not found
+        if http_request is None:
+            for key in ["request", "http_request", "req"]:
+                if key in kwargs and isinstance(kwargs[key], StarletteRequest):
+                    http_request = kwargs[key]
+                    break
+
+        # If still not found, check all kwargs values
+        if http_request is None:
+            for value in kwargs.values():
+                if isinstance(value, StarletteRequest):
+                    http_request = value
+                    break
+
+        if http_request is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=500,
+                detail="Internal error: Request object not found in endpoint parameters",
+            )
+
         try:
-            if not validate_a2a_request(request.headers):
+            if not validate_a2a_request(http_request.headers):
                 from fastapi import HTTPException
 
                 raise HTTPException(
                     status_code=401, detail="Invalid or missing A2A authentication"
                 )
-        except Exception:
-            # Any exception during validation should result in 401
+        except HTTPException:
+            raise
+        except Exception as e:
+            # Log the actual error for debugging, but return generic 401
+            import logging
+
+            logging.getLogger(__name__).error(f"A2A auth validation error: {e}")
             from fastapi import HTTPException
 
             raise HTTPException(
                 status_code=401, detail="Invalid or missing A2A authentication"
             )
 
-        return await func(request, *args, **kwargs)
+        return await func(*args, **kwargs)
 
     return wrapper
 
@@ -435,16 +472,48 @@ def require_dual_auth(func):
         This decorator is particularly useful during migration from custom
         headers to standard Bearer token format, allowing gradual adoption.
     """
+    from starlette.requests import Request as StarletteRequest
 
     @wraps(func)
-    async def wrapper(request, *args, **kwargs):
-        if not validate_dual_auth_request(request.headers):
+    async def wrapper(*args, **kwargs):
+        # Find the Request object in positional args or keyword args
+        http_request = None
+
+        # Check positional arguments
+        for arg in args:
+            if isinstance(arg, StarletteRequest):
+                http_request = arg
+                break
+
+        # Check keyword arguments if not found
+        if http_request is None:
+            for key in ["request", "http_request", "req"]:
+                if key in kwargs and isinstance(kwargs[key], StarletteRequest):
+                    http_request = kwargs[key]
+                    break
+
+        # If still not found, check all kwargs values
+        if http_request is None:
+            for value in kwargs.values():
+                if isinstance(value, StarletteRequest):
+                    http_request = value
+                    break
+
+        if http_request is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=500,
+                detail="Internal error: Request object not found in endpoint parameters",
+            )
+
+        if not validate_dual_auth_request(http_request.headers):
             from fastapi import HTTPException
 
             raise HTTPException(
                 status_code=401, detail="Invalid or missing authentication"
             )
 
-        return await func(request, *args, **kwargs)
+        return await func(*args, **kwargs)
 
     return wrapper

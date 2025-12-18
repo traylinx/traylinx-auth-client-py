@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "traylinx-auth-client"
-version = "1.0.1"
+version = "1.0.2"
 description = "Enterprise-grade authentication client for Traylinx Sentinel API and agent-to-agent communication"
 authors = ["Traylinx <dev@traylinx.com>"]
 license = "MIT"
