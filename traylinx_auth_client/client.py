@@ -735,3 +735,194 @@ class TraylinxAuthClient:
             return "custom"
         else:
             return "none"
+
+    # =========================================================================
+    # Stargate P2P Identity Methods
+    # =========================================================================
+
+    def get_p2p_challenge(self, peer_id: str) -> str:
+        """Fetch a cryptographically signed challenge from Sentinel.
+
+        The challenge must be signed by the agent's private key and then
+        sent back to Sentinel via `certify_p2p_identity`.
+
+        Args:
+            peer_id: The Stargate peer ID (32-character hex)
+
+        Returns:
+            The signed challenge string from Sentinel
+
+        Raises:
+            AuthenticationError: If access denied
+            NetworkError: If network issues occur
+        """
+        headers = {
+            "Authorization": f"Bearer {self.get_access_token()}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = requests.get(
+                f"{self.base_url.rstrip('/')}/a2a/p2p/challenge",
+                params={"peer_id": peer_id},
+                headers=headers,
+                timeout=10,
+            )
+            response.raise_for_status()
+            return response.json()["challenge"]
+        except Exception as e:
+            self._handle_request_error(e, "Failed to fetch P2P challenge")
+
+    def certify_p2p_identity(
+        self,
+        peer_id: str,
+        public_key: str,
+        signature: str,
+        challenge: str,
+    ) -> Dict[str, Any]:
+        """Request a P2P certificate from Sentinel for Stargate identity.
+
+        This method certifies a Stargate P2P identity by sending a signed challenge
+        to Sentinel. Upon successful verification, Sentinel issues a JWT certificate
+        that can be used for P2P authentication.
+
+        Args:
+            peer_id: The Stargate peer ID (hex-encoded hash of public key)
+            public_key: Ed25519 public key (base64-encoded)
+            signature: Signature of the challenge (base64-encoded)
+            challenge: The challenge string that was signed
+
+        Returns:
+            Dict containing:
+                - certificate: JWT certificate string
+                - expires_at: ISO 8601 expiration timestamp
+
+        Raises:
+            AuthenticationError: If signature verification fails or access denied
+            NetworkError: If network issues prevent certification
+            ValidationError: If parameters are invalid
+
+        Example:
+            >>> from traylinx_stargate.identity import IdentityManager
+            >>> import base64
+            >>>
+            >>> identity = IdentityManager()
+            >>> identity.generate_keypair()
+            >>>
+            >>> challenge = f"certify-{time.time()}"
+            >>> signature = identity.sign_message(challenge.encode())
+            >>>
+            >>> client = TraylinxAuthClient()
+            >>> result = client.certify_p2p_identity(
+            ...     peer_id=identity.get_peer_id(),
+            ...     public_key=identity.get_public_key_b64(),
+            ...     signature=base64.b64encode(signature).decode(),
+            ...     challenge=challenge,
+            ... )
+            >>> print(f"Certificate expires: {result['expires_at']}")
+
+        Note:
+            This method requires a valid access token. Call `get_access_token()` first
+            or use the client in a context where tokens are automatically managed.
+        """
+        # Validate inputs
+        if not peer_id or len(peer_id) != 32:
+            raise ValidationError(
+                "peer_id must be a 32-character hex string",
+                error_code="INVALID_PEER_ID",
+                status_code=400,
+            )
+
+        if not public_key:
+            raise ValidationError(
+                "public_key is required",
+                error_code="MISSING_PUBLIC_KEY",
+                status_code=400,
+            )
+
+        if not signature:
+            raise ValidationError(
+                "signature is required",
+                error_code="MISSING_SIGNATURE",
+                status_code=400,
+            )
+
+        if not challenge:
+            raise ValidationError(
+                "challenge is required",
+                error_code="MISSING_CHALLENGE",
+                status_code=400,
+            )
+
+        headers = {
+            "Authorization": f"Bearer {self.get_access_token()}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "peer_id": peer_id,
+            "public_key": public_key,
+            "signature": signature,
+            "challenge": challenge,
+        }
+
+        try:
+            response = self._session.post(
+                f"{self.api_base_url.rstrip('/')}/a2a/p2p/certify",
+                headers=headers,
+                json=payload,
+                timeout=self.config.timeout,
+            )
+
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    if "certificate" not in result or "expires_at" not in result:
+                        raise AuthenticationError(
+                            "Invalid certification response: missing certificate or expires_at",
+                            error_code="INVALID_CERT_RESPONSE",
+                            status_code=200,
+                        )
+                    return result
+                except (ValueError, TypeError) as e:
+                    raise AuthenticationError(
+                        f"Failed to parse certification response: {str(e)}",
+                        error_code="INVALID_CERT_RESPONSE",
+                        status_code=200,
+                    )
+            elif response.status_code == 401:
+                raise AuthenticationError(
+                    "Invalid cryptographic signature",
+                    error_code="INVALID_SIGNATURE",
+                    status_code=401,
+                )
+            elif response.status_code == 409:
+                raise AuthenticationError(
+                    "PeerID already claimed by another user",
+                    error_code="PEER_ID_CLAIMED",
+                    status_code=409,
+                )
+            else:
+                response.raise_for_status()
+
+        except requests.exceptions.RequestException as e:
+            self._handle_request_error(e, "P2P certification")
+
+        return {}
+
+    def get_p2p_certificate_status(self, peer_id: str) -> Optional[Dict[str, Any]]:
+        """Check the status of a P2P certificate.
+
+        Args:
+            peer_id: The Stargate peer ID to check
+
+        Returns:
+            Dict with certificate status, or None if not found
+
+        Note:
+            This is a placeholder for future implementation.
+            Currently returns None.
+        """
+        # Placeholder for future implementation
+        # Would call GET /a2a/p2p/status?peer_id=xxx
+        return None
