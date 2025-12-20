@@ -762,11 +762,11 @@ class TraylinxAuthClient:
         }
 
         try:
-            response = requests.get(
-                f"{self.base_url.rstrip('/')}/a2a/p2p/challenge",
+            response = self._session.get(
+                f"{self.api_base_url.rstrip('/')}/a2a/p2p/challenge",
                 params={"peer_id": peer_id},
                 headers=headers,
-                timeout=10,
+                timeout=self.config.timeout,
             )
             response.raise_for_status()
             return response.json()["challenge"]
@@ -874,21 +874,21 @@ class TraylinxAuthClient:
                 timeout=self.config.timeout,
             )
 
-            if response.status_code == 200:
+            if response.status_code >= 200 and response.status_code < 300:
                 try:
                     result = response.json()
                     if "certificate" not in result or "expires_at" not in result:
                         raise AuthenticationError(
                             "Invalid certification response: missing certificate or expires_at",
                             error_code="INVALID_CERT_RESPONSE",
-                            status_code=200,
+                            status_code=response.status_code,
                         )
                     return result
                 except (ValueError, TypeError) as e:
                     raise AuthenticationError(
                         f"Failed to parse certification response: {str(e)}",
                         error_code="INVALID_CERT_RESPONSE",
-                        status_code=200,
+                        status_code=response.status_code,
                     )
             elif response.status_code == 401:
                 raise AuthenticationError(
