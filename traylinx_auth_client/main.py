@@ -7,12 +7,17 @@ incoming requests.
 """
 
 from functools import wraps
+from threading import Lock
 import requests
 from typing import Dict, Any, Optional, Union
 from .client import TraylinxAuthClient
+from .security import destination, credentials_from, outbound_options
+from .transport import SecureSession
+from .exceptions import TraylinxAuthError
 
 # Default client instance
 _default_client = None
+_default_client_lock = Lock()
 
 
 def get_default_client() -> TraylinxAuthClient:
@@ -32,9 +37,10 @@ def get_default_client() -> TraylinxAuthClient:
         - TRAYLINX_AGENT_USER_ID
     """
     global _default_client
-    if _default_client is None:
-        _default_client = TraylinxAuthClient()
-    return _default_client
+    with _default_client_lock:
+        if _default_client is None:
+            _default_client = TraylinxAuthClient()
+        return _default_client
 
 
 def get_request_headers() -> Dict[str, str]:
@@ -85,132 +91,28 @@ def get_agent_request_headers() -> Dict[str, str]:
 
 
 def validate_a2a_request(headers: Dict[str, str]) -> bool:
-    """Validate an incoming A2A request using custom header format.
-
-    Validates incoming requests that use the custom header format:
-    - X-Agent-Secret-Token: <token>
-    - X-Agent-User-Id: <agent_id>
-
-    Args:
-        headers: Dictionary of request headers (case-insensitive)
-
-    Returns:
-        bool: True if the request is valid and authenticated, False otherwise
-
-    Raises:
-        AuthenticationError: If validation request to auth service fails
-        NetworkError: If network issues occur during validation
-
-    Example:
-        >>> from fastapi import Request
-        >>>
-        >>> @app.post("/endpoint")
-        >>> async def my_endpoint(request: Request):
-        ...     if not validate_a2a_request(request.headers):
-        ...         raise HTTPException(status_code=401, detail="Unauthorized")
-        ...     return {"message": "Authenticated"}
-
-    Note:
-        This function uses case-insensitive header lookup and validates
-        the token against the Traylinx Sentinel API.
-    """
-    agent_secret_token = headers.get("x-agent-secret-token")
-    agent_user_id = headers.get("x-agent-user-id")
-
-    if not agent_secret_token or not agent_user_id:
-        return False
-
-    return get_default_client().validate_token(agent_secret_token, agent_user_id)
+    auth = credentials_from(headers, dual=False)
+    return get_default_client().validate_token(auth[0], auth[1]) if auth else False
 
 
 def require_a2a_auth(func):
-    """Decorator for protecting FastAPI endpoints with A2A authentication.
-
-    This decorator automatically validates incoming requests using the custom
-    header format (X-Agent-Secret-Token) and raises HTTP 401 if authentication
-    fails.
-
-    Args:
-        func: The FastAPI endpoint function to protect
-
-    Returns:
-        Decorated function that performs authentication before calling the original
-
-    Raises:
-        HTTPException: 401 status if authentication fails or is missing
-
-    Example:
-        >>> from fastapi import FastAPI, Request
-        >>> from traylinx_auth_client import require_a2a_auth
-        >>>
-        >>> app = FastAPI()
-        >>>
-        >>> @app.get("/protected")
-        >>> @require_a2a_auth
-        >>> async def protected_endpoint(request: Request):
-        ...     return {"message": "This endpoint requires A2A authentication"}
-
-    Note:
-        The function must have a parameter with type annotation `Request` or a
-        parameter named `request` or `http_request` to access request headers.
-    """
-    from starlette.requests import Request as StarletteRequest
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from starlette.concurrency import run_in_threadpool
 
     @wraps(func)
     async def wrapper(*args, **kwargs):
-        # Find the Request object in positional args or keyword args
-        http_request = None
-
-        # Check positional arguments
-        for arg in args:
-            if isinstance(arg, StarletteRequest):
-                http_request = arg
-                break
-
-        # Check keyword arguments if not found
-        if http_request is None:
-            for key in ["request", "http_request", "req"]:
-                if key in kwargs and isinstance(kwargs[key], StarletteRequest):
-                    http_request = kwargs[key]
-                    break
-
-        # If still not found, check all kwargs values
-        if http_request is None:
-            for value in kwargs.values():
-                if isinstance(value, StarletteRequest):
-                    http_request = value
-                    break
-
-        if http_request is None:
-            from fastapi import HTTPException
-
-            raise HTTPException(
-                status_code=500,
-                detail="Internal error: Request object not found in endpoint parameters",
-            )
-
+        request = next((v for v in (*args, *kwargs.values()) if isinstance(v, Request)), None)
+        if request is None:
+            raise HTTPException(status_code=500, detail="Request object missing")
         try:
-            if not validate_a2a_request(http_request.headers):
-                from fastapi import HTTPException
-
-                raise HTTPException(
-                    status_code=401, detail="Invalid or missing A2A authentication"
-                )
-        except HTTPException:
-            raise
-        except Exception as e:
-            # Log the actual error for debugging, but return generic 401
-            import logging
-
-            logging.getLogger(__name__).error(f"A2A auth validation error: {e}")
-            from fastapi import HTTPException
-
-            raise HTTPException(
-                status_code=401, detail="Invalid or missing A2A authentication"
-            )
-
-        return await func(*args, **kwargs)
-
+            # No blocking requests I/O on the ASGI event loop.
+            valid = await run_in_threadpool(validate_a2a_request, request.headers)
+        except Exception:
+            raise HTTPException(status_code=503, detail="Authentication service unavailable") from None
+        if not valid:
+            raise HTTPException(status_code=401, detail="Invalid or missing A2A authentication")
+        return await func(*args, **kwargs)  # Preserve downstream exceptions.
     return wrapper
 
 
@@ -230,12 +132,12 @@ def a2a_request(method: str = "GET", url: str = None, **kwargs):
         Decorator function that makes authenticated requests
 
     Example:
-        >>> @a2a_request("GET", "http://other-agent:8000/api/data")
+        >>> @a2a_request("GET", "https://other-agent.example/api/data")
         >>> def get_data():
         ...     # This function runs first, then the GET request is made
         ...     print("Fetching data from other agent")
         >>>
-        >>> @a2a_request("POST", "http://other-agent:8000/api/process")
+        >>> @a2a_request("POST", "https://other-agent.example/api/process")
         >>> def process_data(data):
         ...     # Function logic here, then POST request with authentication
         ...     return {"processed": True}
@@ -248,27 +150,11 @@ def a2a_request(method: str = "GET", url: str = None, **kwargs):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **func_kwargs):
-            # Get the result from the original function
-            result = func(*args, **func_kwargs)
-
-            # Make the authenticated request
-            headers = get_agent_request_headers()
-
-            # Merge any additional headers from kwargs
-            if "headers" in kwargs:
-                headers.update(kwargs["headers"])
-
-            # Prepare request parameters
-            request_kwargs = {
-                "headers": headers,
-                **{k: v for k, v in kwargs.items() if k != "headers"},
-            }
-
-            # Make the request
-            response = requests.request(method, url, **request_kwargs)
-            response.raise_for_status()
-
-            return response.json()
+            # Validate before executing user code or obtaining credentials.
+            destination(url)
+            outbound_options(kwargs)
+            func(*args, **func_kwargs)
+            return make_a2a_request(method, url, **kwargs)
 
         return wrapper
 
@@ -276,68 +162,18 @@ def a2a_request(method: str = "GET", url: str = None, **kwargs):
 
 
 def make_a2a_request(method: str, url: str, **kwargs) -> Dict[str, Any]:
-    """Make an authenticated A2A request to another agent.
-
-    This is the primary function for making authenticated requests to other
-    Traylinx agents. It automatically adds the required authentication headers
-    and handles the HTTP request.
-
-    Args:
-        method: HTTP method (GET, POST, PUT, DELETE, PATCH, etc.)
-        url: Target agent's URL (must be a valid HTTP/HTTPS URL)
-        **kwargs: Additional arguments passed to requests.request(), such as:
-            - json: JSON data to send in request body
-            - data: Form data to send in request body
-            - params: URL parameters
-            - timeout: Request timeout in seconds
-            - headers: Additional headers (merged with auth headers)
-
-    Returns:
-        Dict[str, Any]: JSON response from the target agent
-
-    Raises:
-        ValidationError: If client configuration is invalid
-        AuthenticationError: If token acquisition fails
-        NetworkError: If network issues occur
-        requests.HTTPError: If the HTTP request fails (4xx, 5xx status codes)
-        requests.JSONDecodeError: If response is not valid JSON
-
-    Example:
-        >>> # Simple GET request
-        >>> data = make_a2a_request("GET", "https://other-agent.com/api/users")
-        >>>
-        >>> # POST request with JSON data
-        >>> result = make_a2a_request(
-        ...     "POST",
-        ...     "https://other-agent.com/api/process",
-        ...     json={"items": ["item1", "item2"]},
-        ...     timeout=60
-        ... )
-        >>>
-        >>> # PUT request with custom headers
-        >>> response = make_a2a_request(
-        ...     "PUT",
-        ...     "https://other-agent.com/api/update/123",
-        ...     json={"status": "completed"},
-        ...     headers={"X-Custom-Header": "value"}
-        ... )
-
-    Note:
-        This function uses agent-to-agent authentication headers (X-Agent-Secret-Token)
-        and does NOT include the access_token. For calling Traylinx auth service
-        endpoints, use the TraylinxAuthClient methods directly.
-    """
-    headers = get_agent_request_headers()
-
-    # Merge any additional headers
-    if "headers" in kwargs:
-        headers.update(kwargs["headers"])
-        del kwargs["headers"]
-
-    response = requests.request(method, url, headers=headers, **kwargs)
-    response.raise_for_status()
-
-    return response.json()
+    destination(url)  # Reject before obtaining credentials.
+    options = outbound_options(kwargs)
+    headers = dict(options.pop("headers"), **get_agent_request_headers())
+    try:
+        with SecureSession() as session:
+            response = session.request(method, url, headers=headers, **options)
+            response.raise_for_status()
+            return response.json()
+    except TraylinxAuthError:
+        raise
+    except Exception as error:
+        get_default_client()._handle_request_error(error, "agent request")
 
 
 # A2A Extension Functions
@@ -375,8 +211,8 @@ def validate_dual_auth_request(headers: Dict[str, str]) -> bool:
     1. A2A standard format: Authorization: Bearer {agent_secret_token}
     2. TraylinxAuth custom format: X-Agent-Secret-Token: {agent_secret_token}
 
-    The function tries Bearer token format first, then falls back to custom
-    headers for backward compatibility.
+    Exactly one credential format is required. Mixed formats are rejected;
+    failed verification never falls back to another credential.
 
     Args:
         headers: Dictionary of request headers (case-insensitive)
@@ -442,78 +278,21 @@ def detect_auth_mode(headers: Dict[str, str]) -> str:
 
 
 def require_dual_auth(func):
-    """Enhanced decorator supporting both Bearer tokens and custom headers.
-
-    This decorator provides flexible authentication that accepts both A2A standard
-    Bearer token format and TraylinxAuth custom header format. It's useful for
-    endpoints that need to support multiple authentication methods during
-    migration periods.
-
-    Args:
-        func: The FastAPI endpoint function to protect
-
-    Returns:
-        Decorated function that performs dual-mode authentication
-
-    Raises:
-        HTTPException: 401 status if authentication fails with both formats
-
-    Example:
-        >>> @app.post("/flexible-endpoint")
-        >>> @require_dual_auth
-        >>> async def flexible_endpoint(request: Request):
-        ...     # This endpoint accepts both authentication formats:
-        ...     # 1. Authorization: Bearer {token}
-        ...     # 2. X-Agent-Secret-Token: {token}
-        ...     auth_mode = detect_auth_mode(request.headers)
-        ...     return {"auth_mode": auth_mode, "message": "Authenticated"}
-
-    Note:
-        This decorator is particularly useful during migration from custom
-        headers to standard Bearer token format, allowing gradual adoption.
-    """
-    from starlette.requests import Request as StarletteRequest
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from starlette.concurrency import run_in_threadpool
 
     @wraps(func)
     async def wrapper(*args, **kwargs):
-        # Find the Request object in positional args or keyword args
-        http_request = None
-
-        # Check positional arguments
-        for arg in args:
-            if isinstance(arg, StarletteRequest):
-                http_request = arg
-                break
-
-        # Check keyword arguments if not found
-        if http_request is None:
-            for key in ["request", "http_request", "req"]:
-                if key in kwargs and isinstance(kwargs[key], StarletteRequest):
-                    http_request = kwargs[key]
-                    break
-
-        # If still not found, check all kwargs values
-        if http_request is None:
-            for value in kwargs.values():
-                if isinstance(value, StarletteRequest):
-                    http_request = value
-                    break
-
-        if http_request is None:
-            from fastapi import HTTPException
-
-            raise HTTPException(
-                status_code=500,
-                detail="Internal error: Request object not found in endpoint parameters",
-            )
-
-        if not validate_dual_auth_request(http_request.headers):
-            from fastapi import HTTPException
-
-            raise HTTPException(
-                status_code=401, detail="Invalid or missing authentication"
-            )
-
-        return await func(*args, **kwargs)
-
+        request = next((v for v in (*args, *kwargs.values()) if isinstance(v, Request)), None)
+        if request is None:
+            raise HTTPException(status_code=500, detail="Request object missing")
+        try:
+            # No blocking requests I/O on the ASGI event loop.
+            valid = await run_in_threadpool(validate_dual_auth_request, request.headers)
+        except Exception:
+            raise HTTPException(status_code=503, detail="Authentication service unavailable") from None
+        if not valid:
+            raise HTTPException(status_code=401, detail="Invalid or missing authentication")
+        return await func(*args, **kwargs)  # Preserve downstream exceptions.
     return wrapper

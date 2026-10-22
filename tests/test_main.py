@@ -183,8 +183,8 @@ class TestRequireA2AAuthErrorScenarios:
 
         # The decorator catches exceptions and returns 401
         response = self.client.get("/test", headers=headers)
-        assert response.status_code == 401
-        assert "Invalid or missing A2A authentication" in response.json()["detail"]
+        assert response.status_code == 503
+        assert "Authentication service unavailable" in response.json()["detail"]
 
     @patch("traylinx_auth_client.main.validate_a2a_request")
     def test_introspection_service_auth_error(self, mock_validate):
@@ -197,8 +197,8 @@ class TestRequireA2AAuthErrorScenarios:
         }
 
         response = self.client.get("/test", headers=headers)
-        assert response.status_code == 401
-        assert "Invalid or missing A2A authentication" in response.json()["detail"]
+        assert response.status_code == 503
+        assert "Authentication service unavailable" in response.json()["detail"]
 
     @patch("traylinx_auth_client.main.validate_a2a_request")
     def test_introspection_service_timeout(self, mock_validate):
@@ -211,8 +211,8 @@ class TestRequireA2AAuthErrorScenarios:
         }
 
         response = self.client.get("/test", headers=headers)
-        assert response.status_code == 401
-        assert "Invalid or missing A2A authentication" in response.json()["detail"]
+        assert response.status_code == 503
+        assert "Authentication service unavailable" in response.json()["detail"]
 
     @patch("traylinx_auth_client.main.validate_a2a_request")
     def test_introspection_service_unexpected_error(self, mock_validate):
@@ -225,8 +225,8 @@ class TestRequireA2AAuthErrorScenarios:
         }
 
         response = self.client.get("/test", headers=headers)
-        assert response.status_code == 401
-        assert "Invalid or missing A2A authentication" in response.json()["detail"]
+        assert response.status_code == 503
+        assert "Authentication service unavailable" in response.json()["detail"]
 
     def test_malformed_headers(self):
         """Test handling of malformed headers."""
@@ -302,40 +302,22 @@ class TestTimeoutAndRetryLogic:
         with pytest.raises(NetworkError, match="timeout"):
             get_request_headers()
 
-    @patch("requests.post")
-    def test_exponential_backoff_timing(self, mock_post):
-        """Test that exponential backoff timing works correctly."""
-        # Mock responses to simulate retries
-        mock_response = Mock()
-        mock_response.status_code = 429  # Rate limit
-        mock_response.raise_for_status.side_effect = HTTPError("Rate limited")
-        mock_response.response = mock_response  # For error handling
-        mock_post.return_value = mock_response
+    @patch("traylinx_auth_client.transport.SecureSession.post")
+    def test_credential_exchange_is_not_replayed(self, mock_post):
+        """POST token minting must not be automatically repeated on 429."""
+        from traylinx_auth_client.client import TraylinxAuthClient
+        response = Mock(status_code=429)
+        response.raise_for_status.side_effect = HTTPError("Rate limited", response=response)
+        mock_post.return_value = response
+        with TraylinxAuthClient("test", "test_secret_123", "https://api.example.com",
+                "12345678-1234-1234-1234-123456789abc", max_retries=2) as client:
+            with pytest.raises(NetworkError):
+                client.get_access_token()
+        mock_post.assert_called_once()
 
-        start_time = time.time()
-
-        with pytest.raises(NetworkError):
-            # This should trigger retries with exponential backoff
-            from traylinx_auth_client.client import TraylinxAuthClient
-
-            client = TraylinxAuthClient(
-                client_id="test",
-                client_secret="test_secret_123",
-                api_base_url="https://api.example.com",
-                agent_user_id="12345678-1234-1234-1234-123456789abc",
-                max_retries=2,
-                retry_delay=0.1,  # Short delay for testing
-            )
-            client._fetch_tokens()
-
-        elapsed_time = time.time() - start_time
-        # Should take some time due to retries, but not too strict on timing
-        assert elapsed_time >= 0.1
-
-    @pytest.mark.skip(reason="Complex mocking - needs refactoring")
-    @patch("requests.Session")
-    def test_retry_on_specific_status_codes(self, mock_session_class):
-        """Test that retries occur only on specific status codes."""
+    @patch("traylinx_auth_client.client.TraylinxAuthClient._create_session_with_retries")
+    def test_post_status_errors_are_typed_without_retry(self, mock_session_class):
+        """Every POST error is surfaced without minting another token."""
         from traylinx_auth_client.client import TraylinxAuthClient
 
         # Test retry codes
@@ -345,7 +327,7 @@ class TestTimeoutAndRetryLogic:
             mock_response = Mock()
             mock_response.status_code = status_code
             mock_response.raise_for_status.side_effect = HTTPError(
-                f"HTTP {status_code}"
+                f"HTTP {status_code}", response=mock_response
             )
             mock_response.response = mock_response  # For error handling
 
@@ -368,7 +350,7 @@ class TestTimeoutAndRetryLogic:
                 client._fetch_tokens()
 
             # Verify the session was used
-            assert mock_session_instance.post.called
+            mock_session_instance.post.assert_called_once()
             mock_session_class.reset_mock()
 
         # Test non-retry codes
@@ -378,7 +360,7 @@ class TestTimeoutAndRetryLogic:
             mock_response = Mock()
             mock_response.status_code = status_code
             mock_response.raise_for_status.side_effect = HTTPError(
-                f"HTTP {status_code}"
+                f"HTTP {status_code}", response=mock_response
             )
             mock_response.response = mock_response  # For error handling
 
@@ -401,7 +383,7 @@ class TestTimeoutAndRetryLogic:
                 client._fetch_tokens()
 
             # Verify the session was used
-            assert mock_session_instance.post.called
+            mock_session_instance.post.assert_called_once()
             mock_session_class.reset_mock()
 
 
@@ -492,8 +474,7 @@ class TestConcurrencyAndThreadSafety:
             assert len(results) == 20
             assert all(status == 200 for status in results)
 
-    @pytest.mark.skip(reason="Complex mocking - needs refactoring")
-    @patch("requests.Session")
+    @patch("traylinx_auth_client.client.TraylinxAuthClient._create_session_with_retries")
     def test_token_refresh_race_condition(self, mock_session_class):
         """Test handling of race conditions during token refresh."""
         from traylinx_auth_client.client import TraylinxAuthClient
@@ -510,7 +491,7 @@ class TestConcurrencyAndThreadSafety:
 
         mock_session_instance = Mock()
         mock_session_instance.post.return_value = mock_response
-        mock_session.return_value = mock_session_instance
+        mock_session_class.return_value = mock_session_instance
 
         client = TraylinxAuthClient(
             client_id="test",
@@ -554,7 +535,7 @@ class TestConcurrencyAndThreadSafety:
         # Token refresh should have been called at least once
         assert mock_session_instance.post.call_count >= 1
 
-    @patch("requests.Session")
+    @patch("traylinx_auth_client.client.TraylinxAuthClient._create_session_with_retries")
     def test_thread_safety_with_different_clients(self, mock_session_class):
         """Test thread safety when using different client instances."""
         from traylinx_auth_client.client import TraylinxAuthClient
@@ -653,8 +634,7 @@ class TestConcurrencyAndThreadSafety:
 class TestErrorRecoveryAndResilience:
     """Test error recovery and resilience features."""
 
-    @pytest.mark.skip(reason="Complex mocking - needs refactoring")
-    @patch("requests.Session")
+    @patch("traylinx_auth_client.client.TraylinxAuthClient._create_session_with_retries")
     def test_recovery_after_network_failure(self, mock_session_class):
         """Test recovery after temporary network failures."""
         from traylinx_auth_client.client import TraylinxAuthClient
@@ -670,8 +650,8 @@ class TestErrorRecoveryAndResilience:
         mock_response.raise_for_status.return_value = None
 
         mock_session_instance = Mock()
-        mock_session_instance.post.return_value = mock_response
-        mock_session.return_value = mock_session_instance
+        mock_session_instance.post.side_effect = [ConnectionError("temporary"), mock_response]
+        mock_session_class.return_value = mock_session_instance
 
         client = TraylinxAuthClient(
             client_id="test",
@@ -682,13 +662,14 @@ class TestErrorRecoveryAndResilience:
         )
         client._session = mock_session_instance
 
-        # Should succeed and return token
+        # Explicit second attempt, not an automatic token POST replay.
+        with pytest.raises(NetworkError):
+            client.get_access_token()
         token = client.get_access_token()
         assert token == "recovered_token"
         assert mock_session_instance.post.call_count >= 1
 
-    @pytest.mark.skip(reason="Complex mocking - needs refactoring")
-    @patch("requests.Session")
+    @patch("traylinx_auth_client.client.TraylinxAuthClient._create_session_with_retries")
     def test_graceful_degradation(self, mock_session_class):
         """Test graceful degradation when services are unavailable."""
         from traylinx_auth_client.client import TraylinxAuthClient
@@ -696,7 +677,7 @@ class TestErrorRecoveryAndResilience:
         # Mock connection error
         mock_session_instance = Mock()
         mock_session_instance.post.side_effect = ConnectionError("Connection failed")
-        mock_session.return_value = mock_session_instance
+        mock_session_class.return_value = mock_session_instance
 
         client = TraylinxAuthClient(
             client_id="test",
@@ -812,8 +793,7 @@ class TestEdgeCasesAndBoundaryConditions:
             response = client.get("/test", headers=headers)
             assert response.status_code == 200
 
-    @pytest.mark.skip(reason="Complex mocking - needs refactoring")
-    @patch("requests.Session")
+    @patch("traylinx_auth_client.client.TraylinxAuthClient._create_session_with_retries")
     def test_malformed_json_response(self, mock_session_class):
         """Test handling of malformed JSON responses."""
         from traylinx_auth_client.client import TraylinxAuthClient
@@ -826,7 +806,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
         mock_session_instance = Mock()
         mock_session_instance.post.return_value = mock_response
-        mock_session.return_value = mock_session_instance
+        mock_session_class.return_value = mock_session_instance
 
         client = TraylinxAuthClient(
             client_id="test",
@@ -836,11 +816,10 @@ class TestEdgeCasesAndBoundaryConditions:
         )
         client._session = mock_session_instance
 
-        with pytest.raises(AuthenticationError, match="Failed to parse"):
+        with pytest.raises(AuthenticationError, match="Invalid token response"):
             client.get_access_token()
 
-    @pytest.mark.skip(reason="Complex mocking - needs refactoring")
-    @patch("requests.Session")
+    @patch("traylinx_auth_client.client.TraylinxAuthClient._create_session_with_retries")
     def test_missing_required_fields_in_response(self, mock_session_class):
         """Test handling of missing required fields in token response."""
         from traylinx_auth_client.client import TraylinxAuthClient
@@ -856,7 +835,7 @@ class TestEdgeCasesAndBoundaryConditions:
 
         mock_session_instance = Mock()
         mock_session_instance.post.return_value = mock_response
-        mock_session.return_value = mock_session_instance
+        mock_session_class.return_value = mock_session_instance
 
         client = TraylinxAuthClient(
             client_id="test",
@@ -866,5 +845,5 @@ class TestEdgeCasesAndBoundaryConditions:
         )
         client._session = mock_session_instance
 
-        with pytest.raises(AuthenticationError, match="missing fields"):
+        with pytest.raises(AuthenticationError, match="Invalid token response"):
             client.get_access_token()

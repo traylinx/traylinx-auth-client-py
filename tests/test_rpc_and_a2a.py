@@ -40,10 +40,11 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         # Set tokens manually
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999  # Far in the future
 
         result = client.rpc_call("health_check", {})
@@ -74,9 +75,10 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         result = client.rpc_introspect_token("token123", "agent456")
@@ -107,9 +109,10 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         result = client.rpc_get_capabilities()
@@ -136,9 +139,10 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         result = client.rpc_health_check()
@@ -165,9 +169,10 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         result = client.rpc_call(
@@ -204,9 +209,10 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         from traylinx_auth_client.exceptions import ValidationError
@@ -235,13 +241,14 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         from traylinx_auth_client.exceptions import ValidationError
-        with pytest.raises(ValidationError, match="Method not found"):
+        with pytest.raises(ValidationError, match="RPC method not found"):
             client.rpc_call("unknown_method", {})
 
     @patch("traylinx_auth_client.client.TraylinxAuthClient._fetch_tokens")
@@ -266,9 +273,10 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         from traylinx_auth_client.exceptions import ValidationError
@@ -297,12 +305,13 @@ class TestRPCMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
-        with pytest.raises(TraylinxAuthError, match="RPC error"):
+        with pytest.raises(TraylinxAuthError, match="RPC call failed"):
             client.rpc_call("test_method", {})
 
 
@@ -323,9 +332,10 @@ class TestA2AMethods:
             api_base_url="https://api.example.com",
             agent_user_id="12345678-1234-1234-1234-123456789abc",
         )
-        
+
         client._access_token = "test_access_token"
         client._agent_secret_token = "test_secret_token"
+        client._agent_token_expiration = 9999999999
         client._token_expiration = 9999999999
 
         headers = client.get_a2a_headers()
@@ -544,7 +554,7 @@ class TestA2ADecorators:
             assert "Invalid or missing authentication" in response.json()["detail"]
 
     @patch("traylinx_auth_client.main.get_agent_request_headers")
-    @patch("requests.request")
+    @patch("traylinx_auth_client.transport.SecureSession.request")
     def test_a2a_request_decorator(self, mock_request, mock_get_headers):
         """Test @a2a_request decorator."""
         mock_get_headers.return_value = {
@@ -569,7 +579,7 @@ class TestA2ADecorators:
         mock_request.assert_called_once()
 
     @patch("traylinx_auth_client.main.get_agent_request_headers")
-    @patch("requests.request")
+    @patch("traylinx_auth_client.transport.SecureSession.request")
     def test_a2a_request_decorator_with_headers(self, mock_request, mock_get_headers):
         """Test @a2a_request decorator with additional headers."""
         mock_get_headers.return_value = {
@@ -594,11 +604,11 @@ class TestA2ADecorators:
         # Verify headers were merged
         call_args = mock_request.call_args
         headers = call_args[1]["headers"]
-        assert "Custom-Header" in headers
+        assert "custom-header" in headers
         assert "X-Agent-Secret-Token" in headers
 
     @patch("traylinx_auth_client.main.get_agent_request_headers")
-    @patch("requests.request")
+    @patch("traylinx_auth_client.transport.SecureSession.request")
     def test_make_a2a_request(self, mock_request, mock_get_headers):
         """Test make_a2a_request function."""
         mock_get_headers.return_value = {
@@ -618,7 +628,7 @@ class TestA2ADecorators:
         mock_request.assert_called_once()
 
     @patch("traylinx_auth_client.main.get_agent_request_headers")
-    @patch("requests.request")
+    @patch("traylinx_auth_client.transport.SecureSession.request")
     def test_make_a2a_request_with_headers(self, mock_request, mock_get_headers):
         """Test make_a2a_request with additional headers."""
         mock_get_headers.return_value = {
@@ -643,5 +653,5 @@ class TestA2ADecorators:
         # Verify headers were merged
         call_args = mock_request.call_args
         headers = call_args[1]["headers"]
-        assert "Custom-Header" in headers
+        assert "custom-header" in headers
         assert "X-Agent-Secret-Token" in headers

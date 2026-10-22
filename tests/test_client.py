@@ -129,6 +129,7 @@ class TestTokenManagement:
             "access_token": "test_access_token",
             "agent_secret_token": "test_agent_secret_token",
             "expires_in": 3600,
+            "agent_secret_token_expires_in": 3600,
         }
         mock_session.post.return_value = mock_response
 
@@ -167,6 +168,7 @@ class TestTokenManagement:
             "access_token": "cached_access_token",
             "agent_secret_token": "cached_agent_secret_token",
             "expires_in": 3600,
+            "agent_secret_token_expires_in": 3600,
         }
         mock_session.post.return_value = mock_response
 
@@ -209,6 +211,7 @@ class TestRequestHeaders:
             "access_token": "auth_service_token",
             "agent_secret_token": "agent_service_token",
             "expires_in": 3600,
+            "agent_secret_token_expires_in": 3600,
         }
         mock_session.post.return_value = mock_response
 
@@ -241,6 +244,7 @@ class TestRequestHeaders:
             "access_token": "auth_service_token",
             "agent_secret_token": "agent_service_token",
             "expires_in": 3600,
+            "agent_secret_token_expires_in": 3600,
         }
         mock_session.post.return_value = mock_response
 
@@ -384,7 +388,7 @@ class TestErrorHandling:
         }
         mock_session.post.return_value = mock_response
 
-        with pytest.raises(AuthenticationError, match="missing fields"):
+        with pytest.raises(AuthenticationError, match="Invalid token response"):
             client.get_access_token()
 
 

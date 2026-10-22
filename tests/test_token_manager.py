@@ -16,7 +16,7 @@ def mock_env_vars(monkeypatch):
     monkeypatch.setenv("TRAYLINX_API_BASE_URL", "https://test.com")
 
 
-@patch("requests.post")
+@patch("traylinx_auth_client.transport.SecureSession.post")
 def test_fetch_tokens(mock_post, mock_env_vars):
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -34,7 +34,7 @@ def test_fetch_tokens(mock_post, mock_env_vars):
     assert token_manager.agent_secret_token == "test_agent_secret_token"
 
 
-@patch("requests.post")
+@patch("traylinx_auth_client.transport.SecureSession.post")
 def test_get_access_token_fetches_new_token_if_expired(mock_post, mock_env_vars):
     mock_response = MagicMock()
     mock_response.status_code = 200

@@ -115,11 +115,11 @@ class TestClientBasics:
         )
 
         # Test Bearer token detection
-        bearer_headers = {"Authorization": "Bearer test_token"}
+        bearer_headers = {"Authorization": "Bearer test_token", "X-Agent-User-Id": "agent1"}
         assert client.detect_auth_mode(bearer_headers) == "bearer"
 
         # Test custom header detection
-        custom_headers = {"X-Agent-Secret-Token": "test_token"}
+        custom_headers = {"X-Agent-Secret-Token": "test_token", "X-Agent-User-Id": "agent1"}
         assert client.detect_auth_mode(custom_headers) == "custom"
 
         # Test no auth detection
@@ -148,7 +148,7 @@ class TestClientBasics:
         mock_session.post.return_value = mock_response
         client._session = mock_session
 
-        with pytest.raises(AuthenticationError, match="missing fields"):
+        with pytest.raises(AuthenticationError, match="Invalid token response"):
             client.get_access_token()
 
     def test_context_manager(self):
