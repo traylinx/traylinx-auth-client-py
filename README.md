@@ -14,7 +14,22 @@ Requests `>=2.34.2,<3`, FastAPI `>=0.161.0,<1`, Pydantic `>=2.14.1,<3`.
 python -m pip install 'traylinx-auth-client==1.1.0rc1'
 ```
 
-Pin the prerelease explicitly. Unpinned stable installs are not the opt-in path.
+Published on 22 October 2026; registry artifacts reverified on 26 October 2026. Pin the prerelease explicitly;
+unpinned stable installs are not the opt-in path. The JavaScript twin,
+`traylinx-auth-client@1.1.0-rc.1`, is on npm under the `next` tag since 9 November 2026.
+
+The caller and receiving service should use separate agent identities. The receiver
+uses its own verifier credentials, verifies the caller's pass with Sentinel, and
+then applies resource grants. Confirm the verifier OAuth application's owner rather
+than treating a configured agent UUID as proof of that ownership.
+
+## Server release status — 26 October 2026
+
+The Sentinel AUTH/USERS/worker release and a bounded **JavaScript** html2md consumer
+are deployed. Those consumer checks are not a new Python production qualification.
+This Python RC remains opt-in and requires integration-specific deployment approval;
+extended performance/platform qualification remains separate. Source documentation
+updates do not rebuild, republish or alter the sealed wheel and source distribution.
 
 ## Configure
 
