@@ -2,8 +2,8 @@
 
 Sentinel Pass authentication for Traylinx agent-to-agent communication.
 
-> **1.1.0rc1: opt-in release candidate. Not qualified for production deployment.**
-> Existing stable installations are not upgraded by this release.
+> **2.0.0: the hardened Sentinel Pass client.** A major version: Python 3.11+, HTTPS only and
+> stricter credentials break 1.0.x callers, so `<2` pins are not upgraded. See HARDENING.md.
 
 ## Install
 
@@ -11,12 +11,12 @@ Requires **Python >=3.11,<4**. Runtime dependencies, installed automatically:
 Requests `>=2.34.2,<3`, FastAPI `>=0.161.0,<1`, Pydantic `>=2.14.1,<3`.
 
 ```bash
-python -m pip install 'traylinx-auth-client==1.1.0rc1'
+python -m pip install 'traylinx-auth-client>=2,<3'
 ```
 
-Published on 22 October 2026; registry artifacts reverified on 26 October 2026. Pin the prerelease explicitly;
-unpinned stable installs are not the opt-in path. The JavaScript twin,
-`traylinx-auth-client@1.1.0-rc.1`, is on npm under the `next` tag since 9 November 2026.
+2.0.0 is the 1.1.0rc1 code unchanged, released 9 November 2026; the JavaScript twin is
+`traylinx-auth-client@2.0.0` on npm. Deployment approval is still integration-specific: see
+"Deployment gates" in HARDENING.md.
 
 The caller and receiving service should use separate agent identities. The receiver
 uses its own verifier credentials, verifies the caller's pass with Sentinel, and
@@ -27,9 +27,8 @@ than treating a configured agent UUID as proof of that ownership.
 
 The Sentinel AUTH/USERS/worker release and a bounded **JavaScript** html2md consumer
 are deployed. Those consumer checks are not a new Python production qualification.
-This Python RC remains opt-in and requires integration-specific deployment approval;
-extended performance/platform qualification remains separate. Source documentation
-updates do not rebuild, republish or alter the sealed wheel and source distribution.
+Python deployments need their own integration-specific approval; extended
+performance/platform qualification remains separate.
 
 ## Configure
 

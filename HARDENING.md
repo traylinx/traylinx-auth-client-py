@@ -1,6 +1,6 @@
 # Sentinel Pass SDK hardening candidate
 
-Date: 2026-10-22. Status: **opt-in release candidate; production integration is not qualified**.
+Date: 2026-10-22; released as **2.0.0** on 2026-11-09 (unchanged code from 1.1.0rc1). Each integration still needs the server checks under "Deployment gates" below.
 This SDK supplies Sentinel Pass authentication, not the full Google A2A task protocol.
 The historical August sprint is broader than this change; it is not declared complete.
 
@@ -27,9 +27,9 @@ If no pass lifetime is known, the pass is not reused across sequential operation
 
 ## Compatibility and runtime changes
 
-This is intentionally a new prerelease, not a silent patch to an installed stable SDK.
-- JavaScript candidate: `1.1.0-rc.1`, Node.js >=22.
-- Python candidate: `1.1.0rc1`, Python >=3.11,<4.
+This is intentionally a new major version, not a silent patch to an installed stable SDK.
+- JavaScript: `2.0.0` (from candidate `1.1.0-rc.1`), Node.js >=22.
+- Python: `2.0.0` (from candidate `1.1.0rc1`), Python >=3.11,<4.
 - Runtime/development dependency floors and locks refreshed. Legacy Node 14 and Python 3.8 badges are no longer advertised for this candidate.
 - HTTPS-only transport, rejected ambiguous headers, restricted request options, earlier refresh, stricter metadata, sanitized error strings and middleware 503 are deliberate security behavior changes. Callers relying on old unsafe behavior must migrate.
 - Optional custom outgoing options: JS `headers`, `params`, `data`, `timeout`, `signal`; Python `headers`, `params`, `data`, `json`, `timeout`. Authorization/host/cookie overrides are forbidden; input objects are not mutated.
@@ -37,7 +37,7 @@ This is intentionally a new prerelease, not a silent patch to an installed stabl
 
 ## Deployment gates: not solved by an SDK
 
-**Production integration requires server qualification.** Before enabling production agent access, verify the deployed Sentinel server's caller and verifier deactivation, revocation and token-lifetime behavior. The SDK cannot infer server state that introspection omits. Do not interpret publication of this prerelease as approval of a production deployment. Independent security review and live integration qualification remain required.
+**Production integration requires server qualification.** Before enabling production agent access, verify the deployed Sentinel server's caller and verifier deactivation, revocation and token-lifetime behavior. The SDK cannot infer server state that introspection omits. Do not interpret publication of this release as approval of a production deployment. Independent security review and live integration qualification remain required.
 
 Authentication is not authorization. html2md must retain its user bearer-token path and add a separate Sentinel-agent path, then enforce capture grants/ownership/quotas. Reject conflicting credentials; never fall back to another principal after failed proof. Agent ids supplied in headers are untrusted until introspected. Do not log or persist web passwords, passes or tokens.
 
