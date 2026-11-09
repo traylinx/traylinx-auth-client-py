@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-09
+
+The hardened client of 1.1.0rc1 as the stable release, with no code change. It is a major
+version because the changes below break callers of 1.0.x: Python 3.11 or later, HTTPS only,
+ambiguous credentials refused, sanitized errors. `~=1.0` and `<2` pins stay on 1.0.x.
+
 ## [1.1.0rc1] - 2026-10-22 (release candidate)
 
 - Harden credential transport, retries, independent token lifetimes and introspection binding.
