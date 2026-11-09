@@ -300,7 +300,7 @@ class TestApiBaseUrlValidation:
             )
 
         errors = exc_info.value.errors()
-        assert any("must use HTTPS for security" in str(error) for error in errors)
+        assert any("must use HTTPS" in str(error) for error in errors)
 
     def test_invalid_url_formats(self):
         """Test that invalid URL formats are rejected."""

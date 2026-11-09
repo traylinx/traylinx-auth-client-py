@@ -1,6 +1,9 @@
 """Configuration and validation module for TraylinxAuthClient."""
 
 import re
+import math
+from .security import destination
+from .exceptions import ValidationError as DestinationError
 from typing import Optional
 from pydantic import (
     BaseModel,
@@ -26,12 +29,26 @@ class AuthConfig(BaseModel):
     retry_delay: float = 1.0
     cache_tokens: bool = True
     log_level: str = "INFO"
+    agent_token_ttl_seconds: Optional[float] = None
+    refresh_skew_seconds: float = 30
 
     class Config:
         """Pydantic configuration."""
 
         validate_assignment = True
         extra = "forbid"  # Prevent extra fields
+
+    @validator("agent_token_ttl_seconds", pre=True)
+    def validate_agent_ttl(cls, value):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= 2678400):
+            raise ValueError("Invalid agent token lifetime")
+        return value
+
+    @validator("refresh_skew_seconds", pre=True)
+    def validate_refresh_skew(cls, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 300:
+            raise ValueError("Invalid token refresh margin")
+        return value
 
     @validator("client_id")
     def validate_client_id(cls, v):
@@ -94,7 +111,7 @@ class AuthConfig(BaseModel):
 
         return v
 
-    @validator("api_base_url")
+    @validator("api_base_url", pre=True)
     def validate_api_base_url(cls, v):
         """Validate API base URL format and security.
 
@@ -108,6 +125,10 @@ class AuthConfig(BaseModel):
             ValueError: If URL format is invalid or insecure
         """
         url_str = str(v)
+        try:
+            destination(url_str, base=True)
+        except DestinationError:
+            raise ValueError("API base URL must use HTTPS without userinfo, query, fragment or whitespace") from None
 
         # Ensure HTTPS for security
         if not url_str.startswith("https://"):
@@ -273,7 +294,7 @@ def validate_config(**kwargs) -> AuthConfig:
             error_messages.append(f"{field}: {message}")
 
         detailed_message = "; ".join(error_messages)
-        raise ValueError(f"Configuration validation failed: {detailed_message}") from e
+        raise ValueError(f"Configuration validation failed: {detailed_message}") from None
     except Exception as e:
         # Handle other unexpected errors
-        raise ValueError(f"Configuration validation failed: {str(e)}") from e
+        raise ValueError("Configuration validation failed") from None

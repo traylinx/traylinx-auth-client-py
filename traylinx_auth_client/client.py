@@ -1,10 +1,10 @@
 import os
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import time
 from threading import Lock
 import uuid
+from .security import destination, credential, credentials_from, token_state, valid_introspection, AUTH_RESPONSE
+from .transport import SecureSession
 from typing import Dict, Optional, Any
 from .config import AuthConfig, validate_config
 from pydantic import ValidationError as PydanticValidationError
@@ -70,6 +70,8 @@ class TraylinxAuthClient:
         retry_delay=1.0,
         cache_tokens=True,
         log_level="INFO",
+        agent_token_ttl_seconds=None,
+        refresh_skew_seconds=30,
     ):
         """Initialize TraylinxAuthClient with comprehensive input validation.
 
@@ -139,6 +141,8 @@ class TraylinxAuthClient:
             "retry_delay": retry_delay,
             "cache_tokens": cache_tokens,
             "log_level": log_level,
+            "agent_token_ttl_seconds": agent_token_ttl_seconds,
+            "refresh_skew_seconds": refresh_skew_seconds,
         }
 
         # Validate configuration
@@ -161,7 +165,7 @@ class TraylinxAuthClient:
 
             raise ValidationError(
                 error_message, error_code="CONFIG_VALIDATION_ERROR", status_code=400
-            )
+            ) from None
 
         # Set instance attributes from validated config
         self.client_id = self.config.client_id
@@ -172,57 +176,16 @@ class TraylinxAuthClient:
         self._access_token = None
         self._agent_secret_token = None
         self._token_expiration = 0
+        self._agent_token_expiration = 0
+        self._generation = 0
+        self._last_refresh_error = None
         self._lock = Lock()
 
         # Initialize session with retry configuration
         self._session = self._create_session_with_retries()
 
     def _create_session_with_retries(self) -> requests.Session:
-        """Create a requests session with retry configuration and connection pooling.
-
-        Returns:
-            Configured requests.Session with retry logic and connection pooling
-        """
-        session = requests.Session()
-
-        # Configure retry strategy with exponential backoff
-        retry_strategy = Retry(
-            total=self.config.max_retries,
-            backoff_factor=self.config.retry_delay,
-            status_forcelist=[
-                429,
-                500,
-                502,
-                503,
-                504,
-            ],  # Retry on these HTTP status codes
-            allowed_methods=[
-                "HEAD",
-                "GET",
-                "POST",
-                "PUT",
-                "DELETE",
-                "OPTIONS",
-                "TRACE",
-            ],
-            raise_on_status=False,  # Don't raise exception on retry-able status codes
-        )
-
-        # Create HTTP adapter with retry strategy
-        adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=10,  # Connection pooling
-            pool_maxsize=20,
-        )
-
-        # Mount adapter for both HTTP and HTTPS
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-
-        # Set default headers
-        session.headers.update({"User-Agent": "TraylinxAuthClient-Python/1.0.0"})
-
-        return session
+        return SecureSession(self.config.timeout, self.config.max_retries, self.config.retry_delay)
 
     def close(self):
         """Close the HTTP session and clean up resources."""
@@ -254,13 +217,13 @@ class TraylinxAuthClient:
                 f"Request timeout during {context}. Check network connectivity and consider increasing timeout.",
                 error_code="TIMEOUT",
                 status_code=408,
-            )
+            ) from None
         elif isinstance(error, requests.exceptions.ConnectionError):
             raise NetworkError(
                 f"Connection failed during {context}. Check network connectivity and API URL.",
                 error_code="CONNECTION_ERROR",
                 status_code=0,
-            )
+            ) from None
         elif isinstance(error, requests.exceptions.HTTPError):
             response = error.response
             status_code = response.status_code
@@ -270,190 +233,90 @@ class TraylinxAuthClient:
                     f"Authentication failed during {context}. Check client credentials.",
                     error_code="INVALID_CREDENTIALS",
                     status_code=401,
-                )
+                ) from None
             elif status_code == 429:
                 raise NetworkError(
                     f"Rate limit exceeded during {context}. Please retry after some time.",
                     error_code="RATE_LIMIT",
                     status_code=429,
-                )
+                ) from None
             elif 500 <= status_code < 600:
                 raise NetworkError(
                     f"Server error ({status_code}) during {context}. The service may be temporarily unavailable.",
                     error_code="SERVER_ERROR",
                     status_code=status_code,
-                )
+                ) from None
             else:
                 raise NetworkError(
-                    f"HTTP error ({status_code}) during {context}: {response.text}",
+                    f"HTTP error ({status_code}) during {context}",
                     error_code="HTTP_ERROR",
                     status_code=status_code,
-                )
+                ) from None
         else:
             raise TraylinxAuthError(
-                f"Unexpected error during {context}: {str(error)}",
+                f"Unexpected error during {context}",
                 error_code="UNKNOWN_ERROR",
-            )
+            ) from None
 
-    def _fetch_tokens(self):
+    def _fetch_tokens(self, kind="access", generation=None):
+        if generation is None:
+            generation = self._generation
         with self._lock:
-            if self._token_expiration > time.time():
-                return
-
-            data = {
-                "grant_type": "client_credentials",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "scope": "a2a",
-            }
-
+            expiry = self._agent_token_expiration if kind == "agent" else self._token_expiration
+            token = self._agent_secret_token if kind == "agent" else self._access_token
+            if self._generation != generation:
+                if self._last_refresh_error is not None:
+                    kind, message, code, status = self._last_refresh_error
+                    raise kind(message, error_code=code, status_code=status) from None
+                return self._access_token, self._agent_secret_token
+            if token and self.config.cache_tokens and expiry > time.time():
+                return self._access_token, self._agent_secret_token
+            started = time.time()
             try:
-                response = self._session.post(
-                    f"{self.api_base_url.rstrip('/')}/oauth/token",
-                    data=data,
-                    timeout=self.config.timeout,
-                )
+                destination(self.api_base_url, base=True)
+                response = self._session.post(f"{self.api_base_url.rstrip('/')}/oauth/token",
+                    data={"grant_type": "client_credentials", "client_id": self.client_id, "client_secret": self.client_secret, "scope": "a2a"},
+                    timeout=self.config.timeout, response_limit=AUTH_RESPONSE)
                 response.raise_for_status()
-                token_data = response.json()
-
-                # Validate token response structure
-                required_fields = ["access_token", "agent_secret_token", "expires_in"]
-                missing_fields = [
-                    field for field in required_fields if field not in token_data
-                ]
-                if missing_fields:
-                    raise AuthenticationError(
-                        f"Invalid token response: missing fields {missing_fields}",
-                        error_code="MALFORMED_TOKEN_RESPONSE",
-                        status_code=200,
-                    )
-
-                self._access_token = token_data["access_token"]
-                self._agent_secret_token = token_data["agent_secret_token"]
-                self._token_expiration = time.time() + token_data["expires_in"]
-
-            except requests.exceptions.RequestException as e:
-                self._handle_request_error(e, "token fetch")
-            except (KeyError, ValueError, TypeError) as e:
-                raise AuthenticationError(
-                    f"Failed to parse token response: {str(e)}",
-                    error_code="INVALID_TOKEN_RESPONSE",
-                    status_code=200,
-                )
+                values = token_state(response.json(), started, self.config.agent_token_ttl_seconds, self.config.refresh_skew_seconds)
+                self._access_token, self._agent_secret_token, self._token_expiration, self._agent_token_expiration = values
+                self._generation += 1
+                self._last_refresh_error = None
+                return self._access_token, self._agent_secret_token
+            except Exception as error:
+                self._access_token = self._agent_secret_token = None
+                self._token_expiration = self._agent_token_expiration = 0
+                self._generation += 1
+                if isinstance(error, TraylinxAuthError):
+                    safe_error = error
+                elif isinstance(error, (ValueError, TypeError, KeyError)):
+                    safe_error = AuthenticationError("Invalid token response", error_code="INVALID_TOKEN_RESPONSE")
+                else:
+                    try:
+                        self._handle_request_error(error, "token fetch")
+                    except TraylinxAuthError as converted:
+                        safe_error = converted
+                # Store only sanitized data, never transport objects or tracebacks.
+                self._last_refresh_error = (type(safe_error), str(safe_error), safe_error.error_code, safe_error.status_code)
+                raise safe_error from None
 
     def get_access_token(self) -> str:
-        """Get a valid access token for calling Traylinx Sentinel API endpoints.
-
-        This method returns the current access token, automatically fetching a new one
-        if the current token has expired. The access token is used for authenticating
-        requests to Traylinx Sentinel API endpoints.
-
-        Returns:
-            str: A valid access token (JWT format)
-
-        Raises:
-            TokenExpiredError: If the token is unavailable after fetch attempt
-            AuthenticationError: If token fetch fails due to invalid credentials
-            NetworkError: If network issues prevent token fetch
-            ValidationError: If client configuration is invalid
-
-        Example:
-            >>> client = TraylinxAuthClient()
-            >>> token = client.get_access_token()
-            >>> headers = {"Authorization": f"Bearer {token}"}
-            >>> response = requests.get("https://auth.traylinx.com/a2a/rpc", headers=headers)
-
-        Note:
-            This method is thread-safe and handles automatic token refresh.
-            The token is cached until expiration to minimize API calls.
-        """
-        if self._token_expiration < time.time():
-            self._fetch_tokens()
-
-        if not self._access_token:
-            raise TokenExpiredError(
-                "Access token is not available. Token fetch may have failed.",
-                error_code="TOKEN_UNAVAILABLE",
-                status_code=401,
-            )
-
-        return self._access_token
+        generation = self._generation
+        with self._lock:
+            if self.config.cache_tokens and self._access_token and self._token_expiration > time.time():
+                return self._access_token
+        return self._fetch_tokens("access", generation)[0]
 
     def get_agent_secret_token(self) -> str:
-        """Get a valid agent secret token for agent-to-agent communication.
-
-        This method returns the current agent secret token, automatically fetching
-        a new one if the current token has expired. The agent secret token is used
-        for authenticating requests to other Traylinx agents.
-
-        Returns:
-            str: A valid agent secret token
-
-        Raises:
-            TokenExpiredError: If the token is unavailable after fetch attempt
-            AuthenticationError: If token fetch fails due to invalid credentials
-            NetworkError: If network issues prevent token fetch
-            ValidationError: If client configuration is invalid
-
-        Example:
-            >>> client = TraylinxAuthClient()
-            >>> token = client.get_agent_secret_token()
-            >>> headers = {"X-Agent-Secret-Token": token, "X-Agent-User-Id": "agent-id"}
-            >>> response = requests.post("https://other-agent.com/api", headers=headers)
-
-        Note:
-            This method is thread-safe and handles automatic token refresh.
-            The token is cached until expiration to minimize API calls.
-        """
-        if self._token_expiration < time.time():
-            self._fetch_tokens()
-
-        if not self._agent_secret_token:
-            raise TokenExpiredError(
-                "Agent secret token is not available. Token fetch may have failed.",
-                error_code="TOKEN_UNAVAILABLE",
-                status_code=401,
-            )
-
-        return self._agent_secret_token
+        generation = self._generation
+        with self._lock:
+            if self.config.cache_tokens and self._agent_secret_token and self._agent_token_expiration > time.time():
+                return self._agent_secret_token
+        return self._fetch_tokens("agent", generation)[1]
 
     def get_request_headers(self) -> Dict[str, str]:
-        """Get headers for calling Traylinx Sentinel API endpoints.
-
-        Returns headers that include both access_token and agent_secret_token,
-        suitable for making requests to Traylinx Sentinel API endpoints that
-        require full authentication context.
-
-        Returns:
-            Dict[str, str]: Headers dictionary containing:
-                - Authorization: Bearer <access_token>
-                - X-Agent-Secret-Token: <agent_secret_token>
-                - X-Agent-User-Id: <agent_user_id>
-
-        Raises:
-            TokenExpiredError: If tokens are unavailable
-            AuthenticationError: If token fetch fails
-            NetworkError: If network issues occur during token fetch
-
-        Example:
-            >>> client = TraylinxAuthClient()
-            >>> headers = client.get_request_headers()
-            >>> response = requests.post(
-            ...     "https://auth.traylinx.com/a2a/rpc",
-            ...     headers=headers,
-            ...     json={"jsonrpc": "2.0", "method": "health_check", "id": "1"}
-            ... )
-
-        Note:
-            Use this method when calling Traylinx Sentinel API endpoints.
-            For agent-to-agent communication, use get_agent_request_headers() instead.
-        """
-        headers = {
-            "Authorization": f"Bearer {self.get_access_token()}",
-            "X-Agent-Secret-Token": self.get_agent_secret_token(),
-            "X-Agent-User-Id": self.agent_user_id,
-        }
-        return headers
+        access, agent = self._fetch_tokens("agent")
+        return {"Authorization": f"Bearer {access}", "X-Agent-Secret-Token": agent, "X-Agent-User-Id": self.agent_user_id}
 
     def get_agent_request_headers(self) -> Dict[str, str]:
         """Get headers for agent-to-agent communication.
@@ -492,85 +355,27 @@ class TraylinxAuthClient:
         return headers
 
     def validate_token(self, agent_secret_token: str, agent_user_id: str) -> bool:
-        """Validate an agent secret token against the Traylinx Sentinel API.
+        return self.introspect_token(agent_secret_token, agent_user_id)["active"]
 
-        This method validates whether a given agent secret token is valid and active
-        by making a request to the Traylinx Sentinel token introspection endpoint.
-        It's commonly used to validate incoming requests from other agents.
-
-        Args:
-            agent_secret_token (str): The agent secret token to validate
-            agent_user_id (str): The agent user ID associated with the token
-
-        Returns:
-            bool: True if the token is valid and active, False otherwise
-
-        Raises:
-            AuthenticationError: If the validation request fails due to invalid
-                access token or malformed response
-            NetworkError: If network issues occur during validation
-            ValidationError: If the response format is invalid
-
-        Example:
-            >>> client = TraylinxAuthClient()
-            >>>
-            >>> # Validate incoming request in FastAPI endpoint
-            >>> @app.post("/protected")
-            >>> async def protected_endpoint(request: Request):
-            ...     token = request.headers.get("x-agent-secret-token")
-            ...     agent_id = request.headers.get("x-agent-user-id")
-            ...
-            ...     if not client.validate_token(token, agent_id):
-            ...         raise HTTPException(status_code=401, detail="Invalid token")
-            ...
-            ...     return {"message": "Token is valid"}
-
-        Note:
-            This method uses the client's access_token to authenticate the
-            validation request to the Traylinx Sentinel API. The method is
-            thread-safe and handles automatic token refresh if needed.
-        """
-        headers = {
-            "Authorization": f"Bearer {self.get_access_token()}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        data = {
-            "agent_secret_token": agent_secret_token,
-            "agent_user_id": agent_user_id,
-        }
-
+    def introspect_token(self, agent_secret_token: str, agent_user_id: str) -> dict:
+        if not credential(agent_secret_token) or not credential(agent_user_id) or len(agent_user_id) > 256:
+            return {"active": False}
         try:
-            response = self._session.post(
-                f"{self.api_base_url.rstrip('/')}/oauth/agent/introspect",
-                headers=headers,
-                data=data,
-                timeout=self.config.timeout,
-            )
-
-            if response.status_code == 200:
-                try:
-                    return response.json().get("active", False)
-                except (ValueError, TypeError) as e:
-                    raise AuthenticationError(
-                        f"Failed to parse token validation response: {str(e)}",
-                        error_code="INVALID_VALIDATION_RESPONSE",
-                        status_code=200,
-                    )
-            elif response.status_code == 401:
-                # Invalid access token used for validation
-                raise AuthenticationError(
-                    "Access token invalid for token validation",
-                    error_code="INVALID_ACCESS_TOKEN",
-                    status_code=401,
-                )
-            else:
-                # Other HTTP errors
-                response.raise_for_status()
-
-        except requests.exceptions.RequestException as e:
-            self._handle_request_error(e, "token validation")
-
-        return False
+            response = self._session.post(f"{self.api_base_url.rstrip('/')}/oauth/agent/introspect",
+                headers={"Authorization": f"Bearer {self.get_access_token()}", "Content-Type": "application/x-www-form-urlencoded"},
+                data={"agent_secret_token": agent_secret_token, "agent_user_id": agent_user_id},
+                timeout=self.config.timeout, response_limit=AUTH_RESPONSE)
+            if response.status_code == 400:
+                return {"active": False}
+            response.raise_for_status()
+            data = response.json()
+            if not valid_introspection(data, agent_user_id):
+                return {"active": False}
+            return {key: data[key] for key in ("active", "agent_id", "scopes", "expires_at", "agent_type") if key in data}
+        except requests.exceptions.RequestException as error:
+            self._handle_request_error(error, "token validation")
+        except (ValueError, TypeError):
+            raise AuthenticationError("Invalid introspection response", error_code="INVALID_VALIDATION_RESPONSE") from None
 
     def rpc_call(
         self,
@@ -580,6 +385,10 @@ class TraylinxAuthClient:
         include_agent_credentials: bool = None,
     ):
         rpc_url = rpc_url or f"{self.api_base_url.rstrip('/')}/a2a/rpc"
+        target = destination(rpc_url)
+        sentinel = destination(self.api_base_url)
+        if include_agent_credentials is False and (target.hostname, target.port or 443) != (sentinel.hostname, sentinel.port or 443):
+            raise ValidationError("Access token may only be sent to Sentinel", error_code="UNSAFE_DESTINATION")
 
         # Auto-detect: if calling auth service (default), only use access_token
         # If calling another agent, use ONLY agent_secret_token (NO access_token!)
@@ -613,12 +422,14 @@ class TraylinxAuthClient:
 
             try:
                 result = response.json()
+                if not isinstance(result, dict) or ("error" in result and not isinstance(result["error"], dict)):
+                    raise ValueError("Invalid RPC envelope")
 
                 # Check for JSON-RPC error response
                 if "error" in result:
                     error_info = result["error"]
                     error_code = error_info.get("code", "RPC_ERROR")
-                    error_message = error_info.get("message", "RPC call failed")
+                    error_message = "RPC call failed"
 
                     if error_code == -32600:  # Invalid Request
                         raise ValidationError(
@@ -628,7 +439,7 @@ class TraylinxAuthClient:
                         )
                     elif error_code == -32601:  # Method not found
                         raise ValidationError(
-                            f"RPC method '{method}' not found: {error_message}",
+                            f"RPC method not found: {error_message}",
                             error_code="METHOD_NOT_FOUND",
                             status_code=404,
                         )
@@ -640,8 +451,8 @@ class TraylinxAuthClient:
                         )
                     else:
                         raise TraylinxAuthError(
-                            f"RPC error ({error_code}): {error_message}",
-                            error_code=str(error_code),
+                            error_message,
+                            error_code="RPC_ERROR",
                             status_code=500,
                         )
 
@@ -649,13 +460,13 @@ class TraylinxAuthClient:
 
             except (ValueError, TypeError) as e:
                 raise TraylinxAuthError(
-                    f"Failed to parse RPC response: {str(e)}",
+                    "Invalid service response",
                     error_code="INVALID_RPC_RESPONSE",
                     status_code=200,
                 )
 
         except requests.exceptions.RequestException as e:
-            self._handle_request_error(e, f"RPC call to {method}")
+            self._handle_request_error(e, "RPC call")
 
     def rpc_introspect_token(self, agent_secret_token: str, agent_user_id: str):
         params = {
@@ -687,54 +498,12 @@ class TraylinxAuthClient:
         }
 
     def validate_a2a_request(self, headers: dict) -> bool:
-        """Validate A2A request supporting both Bearer tokens and custom headers.
-
-        This method provides dual-mode validation:
-        1. Bearer token format: Authorization: Bearer {token}
-        2. Custom header format: X-Agent-Secret-Token: {token}
-
-        Args:
-            headers: Request headers dict (case-insensitive)
-
-        Returns:
-            True if authentication is valid, False otherwise
-        """
-        # Normalize headers to lowercase for case-insensitive lookup
-        normalized_headers = {k.lower(): v for k, v in headers.items()}
-
-        # Try Bearer token format first (A2A standard)
-        auth_header = normalized_headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header.replace("Bearer ", "").strip()
-            agent_id = normalized_headers.get("x-agent-user-id")
-            if token and agent_id:
-                return self.validate_token(token, agent_id)
-
-        # Fall back to custom header format (backward compatibility)
-        custom_token = normalized_headers.get("x-agent-secret-token")
-        agent_id = normalized_headers.get("x-agent-user-id")
-        if custom_token and agent_id:
-            return self.validate_token(custom_token, agent_id)
-
-        return False
+        auth = credentials_from(headers)
+        return self.validate_token(auth[0], auth[1]) if auth else False
 
     def detect_auth_mode(self, headers: dict) -> str:
-        """Detect authentication mode from request headers.
-
-        Args:
-            headers: Request headers dict
-
-        Returns:
-            'bearer' for Bearer token format, 'custom' for custom headers, 'none' if no auth detected
-        """
-        normalized_headers = {k.lower(): v for k, v in headers.items()}
-
-        if normalized_headers.get("authorization", "").startswith("Bearer "):
-            return "bearer"
-        elif normalized_headers.get("x-agent-secret-token"):
-            return "custom"
-        else:
-            return "none"
+        auth = credentials_from(headers)
+        return auth[2] if auth else "none"
 
     # =========================================================================
     # Stargate P2P Identity Methods
@@ -886,7 +655,7 @@ class TraylinxAuthClient:
                     return result
                 except (ValueError, TypeError) as e:
                     raise AuthenticationError(
-                        f"Failed to parse certification response: {str(e)}",
+                        "Invalid service response",
                         error_code="INVALID_CERT_RESPONSE",
                         status_code=response.status_code,
                     )

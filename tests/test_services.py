@@ -34,7 +34,7 @@ def mock_auth_service(requests_mock):
 def test_validate_token_success(mock_env_vars, mock_auth_service, requests_mock):
     requests_mock.post(
         "https://test.com/oauth/agent/introspect",  # Services use token manager URLs
-        json={"active": True},
+        json={"active": True, "agent_id": "12345678-1234-1234-1234-123456789abc", "scopes": "a2a", "expires_at": 9999999999},
         status_code=200,
     )
 
